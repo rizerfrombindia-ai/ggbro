@@ -8,9 +8,17 @@ import urllib.request
 import urllib.parse
 import urllib.error
 
+# Ensure stdout and stderr handle any unicode on Windows without crashing
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 class TelegramRDPBot:
     def __init__(self):
-        # Read environment variables with hardcoded fallbacks
         self.token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
         if not self.token:
             self.token = "9256338881:AAEv3FIlK4-h03NnbDgT_iI_-KdTpFs9Aeg"
@@ -23,12 +31,11 @@ class TelegramRDPBot:
         if not self.pin:
             self.pin = "123456"
 
-        self.tunnel_type = os.environ.get("TUNNEL_TYPE", "Ngrok").strip()
+        self.tunnel_type = os.environ.get("TUNNEL_TYPE", "Bore (bore.pub)").strip()
         self.crd_active = os.environ.get("CRD_ACTIVE", "false").strip().lower() == "true"
         self.initial_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
         self.start_time = time.time()
-        # GitHub Actions max job duration is 6 hours; shut down gracefully 5 mins before
         self.max_duration_seconds = 6 * 3600 - 300
         self.running = True
 
@@ -137,8 +144,10 @@ class TelegramRDPBot:
 
         bot_info = me.get("result", {})
         bot_user = bot_info.get("username", "UnknownBot")
-        print(f"✅ Telegram Bot Authenticated: @{bot_user} ({bot_info.get('first_name', '')})")
-        print("🌐 Mode: Open to everyone (no user ID restriction). Anyone sending /start gets credentials.")
+        first_name = bot_info.get("first_name", "")
+        # Clean ASCII log for Windows console compatibility
+        print(f"[OK] Telegram Bot Authenticated: @{bot_user} ({first_name})")
+        print("[INFO] Mode: Open to everyone. Anyone sending /start gets credentials.")
 
         if self.initial_chat_id:
             print(f"Sending credentials to initial Chat ID: {self.initial_chat_id}")
@@ -204,7 +213,10 @@ class TelegramRDPBot:
                     from_user = msg.get("from", {}).get("username") or msg.get("from", {}).get("first_name", "User")
                     text = msg.get("text", "").strip()
 
-                    print(f"[Telegram Message] From: {from_user} ({chat_id}) | Text: {text}")
+                    # Print safe ASCII to avoid Windows cp1252 console issues
+                    user_clean = str(from_user).encode("ascii", "replace").decode("ascii")
+                    text_clean = text.encode("ascii", "replace").decode("ascii")
+                    print(f"[Telegram Message] From: {user_clean} ({chat_id}) | Text: {text_clean}")
 
                     if text.startswith("/start") or text.startswith("/rdp") or text.startswith("/info"):
                         self.send_message(chat_id, self.format_credentials_message(), self.get_inline_keyboard())
@@ -223,7 +235,6 @@ class TelegramRDPBot:
                         )
                         self.send_message(chat_id, help_text, self.get_inline_keyboard())
                     else:
-                        # Any other message (e.g. hi, hello, start) returns connection details
                         self.send_message(chat_id, self.format_credentials_message(), self.get_inline_keyboard())
 
             except Exception as e:
