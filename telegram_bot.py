@@ -73,7 +73,7 @@ class TelegramRDPBot:
             f"🌐 <b>Tunnel:</b> {html.escape(self.tunnel_type)}\n"
             f"🖥 <b>Host / IP:</b> <code>{html.escape(self.host)}</code>\n"
             f"🔌 <b>Port:</b> <code>{html.escape(self.port)}</code>\n"
-            f"👤 <b>Username:</b> <code>{html.escape(self.username)}</code> (or <code>Administrator</code>)\n"
+            f"👤 <b>Username:</b> <code>{html.escape(self.username)}</code>\n"
             f"🔑 <b>VPS PIN / Password:</b> <code>{html.escape(self.pin)}</code>\n\n"
             f"📱 <b>Direct Connection String (for RDP Apps):</b>\n"
             f"<code>{html.escape(self.host)}:{html.escape(self.port)}</code>\n\n"
@@ -138,8 +138,8 @@ class TelegramRDPBot:
         bot_info = me.get("result", {})
         bot_user = bot_info.get("username", "UnknownBot")
         print(f"✅ Telegram Bot Authenticated: @{bot_user} ({bot_info.get('first_name', '')})")
+        print("🌐 Mode: Open to everyone (no user ID restriction). Anyone sending /start gets credentials.")
 
-        # Proactively send credentials if initial chat_id is provided
         if self.initial_chat_id:
             print(f"Sending credentials to initial Chat ID: {self.initial_chat_id}")
             self.send_message(
@@ -173,7 +173,7 @@ class TelegramRDPBot:
                 for update in updates.get("result", []):
                     offset = update["update_id"] + 1
 
-                    # Handle inline button callbacks
+                    # Handle button callbacks (from any user)
                     if "callback_query" in update:
                         cq = update["callback_query"]
                         cq_id = cq["id"]
@@ -195,15 +195,16 @@ class TelegramRDPBot:
                             self.answer_callback_query(cq_id)
                         continue
 
-                    # Handle incoming chat messages
+                    # Handle messages from any user
                     msg = update.get("message")
                     if not msg:
                         continue
 
                     chat_id = msg["chat"]["id"]
+                    from_user = msg.get("from", {}).get("username") or msg.get("from", {}).get("first_name", "User")
                     text = msg.get("text", "").strip()
 
-                    print(f"[Telegram Message] From: {chat_id} | Text: {text}")
+                    print(f"[Telegram Message] From: {from_user} ({chat_id}) | Text: {text}")
 
                     if text.startswith("/start") or text.startswith("/rdp") or text.startswith("/info"):
                         self.send_message(chat_id, self.format_credentials_message(), self.get_inline_keyboard())
@@ -222,7 +223,7 @@ class TelegramRDPBot:
                         )
                         self.send_message(chat_id, help_text, self.get_inline_keyboard())
                     else:
-                        # Any other message returns connection details
+                        # Any other message (e.g. hi, hello, start) returns connection details
                         self.send_message(chat_id, self.format_credentials_message(), self.get_inline_keyboard())
 
             except Exception as e:
