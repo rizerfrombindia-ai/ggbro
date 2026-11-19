@@ -8,9 +8,9 @@ on:
         required: true
         default: '9256338881:AAEv3FIlK4-h03NnbDgT_iI_-KdTpFs9Aeg'
       ngrok_token:
-        description: 'Ngrok Auth Token (from dashboard.ngrok.com)'
+        description: 'Ngrok Auth Token (Optional: requires card verified ngrok account; leave blank for instant free Bore tunnel)'
         required: false
-        default: '3MLF0ZGF3pzMtvDYrkP726Dj6Ws_7syEqhxtBiXR32JZgCsYn'
+        default: ''
       pin:
         description: 'VPS PIN / Password for RDP (Default: 123456)'
         required: false
@@ -116,59 +116,89 @@ jobs:
         New-Item -ItemType SymbolicLink -Target "C:\Users\$Env:USERNAME\Documents\ninjaripper\x86\NinjaRipper.exe" -Path "C:\Users\$Env:USERNAME\Desktop\Ninjaripper.lnk" -ErrorAction SilentlyContinue
         New-Item -ItemType SymbolicLink -Target "C:\Users\$Env:USERNAME\Documents\noesis\Noesis64.exe" -Path "C:\Users\$Env:USERNAME\Desktop\Noesis.lnk" -ErrorAction SilentlyContinue
 
-    - name: Setup Public RDP Tunnel (Ngrok or Pinggy)
+    - name: Setup Public RDP Tunnel (Bore / Pinggy / Ngrok)
       id: tunnel
       run: |
         $ngrokToken = "${{ inputs.ngrok_token }}".Trim()
-        if (-not $ngrokToken) {
-          $ngrokToken = "3MLF0ZGF3pzMtvDYrkP726Dj6Ws_7syEqhxtBiXR32JZgCsYn"
-        }
         $rdpHost = ""
         $rdpPort = ""
         $tunnelType = ""
 
+        # 1. Try Ngrok if token was provided
         if ($ngrokToken) {
-          Write-Host "=== Setting up Ngrok Tunnel ==="
-          $tunnelType = "Ngrok"
-          Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "ngrok.zip"
-          Expand-Archive -Path "ngrok.zip" -DestinationPath "$Env:USERPROFILE\ngrok" -Force
-          & "$Env:USERPROFILE\ngrok\ngrok.exe" config add-authtoken $ngrokToken
-          Start-Process -FilePath "$Env:USERPROFILE\ngrok\ngrok.exe" -ArgumentList "tcp 3389" -NoNewWindow
+          Write-Host "=== Checking Ngrok Tunnel ==="
+          try {
+            Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "ngrok.zip" -TimeoutSec 15
+            Expand-Archive -Path "ngrok.zip" -DestinationPath "$Env:USERPROFILE\ngrok" -Force
+            & "$Env:USERPROFILE\ngrok\ngrok.exe" config add-authtoken $ngrokToken
+            Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"`"$Env:USERPROFILE\ngrok\ngrok.exe`" tcp 3389 > ngrok.log 2>&1`"" -WindowStyle Hidden
 
-          # Poll Ngrok Local API for public URL
-          for ($i = 0; $i -lt 20; $i++) {
-            Start-Sleep -Seconds 2
-            try {
-              $resp = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels"
-              if ($resp.tunnels -and $resp.tunnels.Count -gt 0) {
-                $tcpUrl = $resp.tunnels[0].public_url
-                $uri = [System.Uri]$tcpUrl
-                $rdpHost = $uri.Host
-                $rdpPort = $uri.Port.ToString()
-                Write-Host "Ngrok TCP Tunnel established: $tcpUrl"
+            for ($i = 0; $i -lt 5; $i++) {
+              Start-Sleep -Seconds 1
+              $ngrokLog = ""
+              if (Test-Path "ngrok.log") { $ngrokLog = Get-Content "ngrok.log" -Raw -ErrorAction SilentlyContinue }
+              if ($ngrokLog -match "ERR_NGROK_8013" -or $ngrokLog -match "credit or debit card") {
+                Write-Warning "Ngrok requires credit card verification (ERR_NGROK_8013). Auto-switching to Bore (No card required)..."
                 break
               }
-            } catch {
-              # wait for ngrok service to start
+              try {
+                $resp = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 2
+                if ($resp.tunnels -and $resp.tunnels.Count -gt 0) {
+                  $tcpUrl = $resp.tunnels[0].public_url
+                  $uri = [System.Uri]$tcpUrl
+                  $rdpHost = $uri.Host
+                  $rdpPort = $uri.Port.ToString()
+                  $tunnelType = "Ngrok"
+                  Write-Host "Ngrok TCP Tunnel established: $tcpUrl"
+                  break
+                }
+              } catch { }
             }
+          } catch {
+            Write-Warning "Ngrok setup error. Falling back to free tunnel."
           }
         }
 
-        # Fallback to Pinggy if Ngrok was not provided or failed
+        # 2. Try Bore (100% Free, Zero Card, Zero Token, Instant)
+        if (-not $rdpHost) {
+          Write-Host "=== Setting up Bore Free TCP Tunnel (No Credit Card Required) ==="
+          try {
+            Invoke-WebRequest -Uri "https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-pc-windows-msvc.zip" -OutFile "bore.zip" -TimeoutSec 15
+            Expand-Archive -Path "bore.zip" -DestinationPath "$Env:USERPROFILE\bore" -Force
+            Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"`"$Env:USERPROFILE\bore\bore.exe`" local 3389 --to bore.pub > bore.log 2>&1`"" -WindowStyle Hidden
+
+            for ($i = 0; $i -lt 12; $i++) {
+              Start-Sleep -Seconds 1
+              $boreLog = ""
+              if (Test-Path "bore.log") { $boreLog = Get-Content "bore.log" -Raw -ErrorAction SilentlyContinue }
+              if ($boreLog -match 'listening at ([a-zA-Z0-9\.\-]+):(\d+)') {
+                $rdpHost = $Matches[1]
+                $rdpPort = $Matches[2]
+                $tunnelType = "Bore (bore.pub)"
+                Write-Host "Bore TCP Tunnel established: ${rdpHost}:${rdpPort}"
+                break
+              }
+            }
+          } catch {
+            Write-Warning "Bore setup error. Falling back to Pinggy..."
+          }
+        }
+
+        # 3. Fallback to Pinggy if Bore didn't bind
         if (-not $rdpHost) {
           Write-Host "=== Setting up Pinggy Free TCP Tunnel as Fallback ==="
-          $tunnelType = "Pinggy"
-          Start-Process -FilePath "ssh" -ArgumentList "-p 443 -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -R0:localhost:3389 tcp@free.pinggy.io" -RedirectStandardOutput "pinggy.log" -RedirectStandardError "pinggy_err.log" -PassThru -NoNewWindow
+          New-Item -ItemType Directory -Path "$Env:USERPROFILE\.ssh" -Force -ErrorAction SilentlyContinue
+          Start-Process -FilePath "cmd.exe" -ArgumentList '/c "ssh -p 443 -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o ServerAliveInterval=30 -R0:localhost:3389 tcp@free.pinggy.io > pinggy.log 2>&1"' -WindowStyle Hidden
 
-          for ($i = 0; $i -lt 25; $i++) {
+          for ($i = 0; $i -lt 15; $i++) {
             Start-Sleep -Seconds 2
             $logContent = ""
-            if (Test-Path "pinggy.log") { $logContent += (Get-Content "pinggy.log" -Raw) }
-            if (Test-Path "pinggy_err.log") { $logContent += (Get-Content "pinggy_err.log" -Raw) }
+            if (Test-Path "pinggy.log") { $logContent = Get-Content "pinggy.log" -Raw -ErrorAction SilentlyContinue }
 
             if ($logContent -match 'tcp://([a-zA-Z0-9\.\-]+):(\d+)') {
               $rdpHost = $Matches[1]
               $rdpPort = $Matches[2]
+              $tunnelType = "Pinggy"
               Write-Host "Pinggy TCP Tunnel established: tcp://${rdpHost}:${rdpPort}"
               break
             }
@@ -176,17 +206,18 @@ jobs:
         }
 
         if (-not $rdpHost) {
-          Write-Error "Failed to establish a public tunnel. Check Ngrok token or network."
+          Write-Error "Failed to establish a public tunnel. Check network access."
           exit 1
         }
 
         Write-Host "============================================="
         Write-Host "RDP Connection Ready:"
-        Write-Host "Host: $rdpHost"
-        Write-Host "Port: $rdpPort"
-        Write-Host "User: runneradmin"
-        Write-Host "PIN:  ${{ inputs.pin }}"
-        Write-Host "Full: ${rdpHost}:${rdpPort}"
+        Write-Host "Tunnel: $tunnelType"
+        Write-Host "Host:   $rdpHost"
+        Write-Host "Port:   $rdpPort"
+        Write-Host "User:   runneradmin"
+        Write-Host "PIN:    ${{ inputs.pin }}"
+        Write-Host "Full:   ${rdpHost}:${rdpPort}"
         Write-Host "============================================="
 
         "RDP_HOST=$rdpHost" | Out-File -FilePath $Env:GITHUB_ENV -Append
