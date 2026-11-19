@@ -1,0 +1,196 @@
+name: Windows RDP with Telegram Bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      telegram_token:
+        description: 'Telegram Bot Token (from @BotFather)'
+        required: true
+        default: '9256338881:AAEv3FIlK4-h03NnbDgT_iI_-KdTpFs9Aeg'
+      ngrok_token:
+        description: 'Ngrok Auth Token (from dashboard.ngrok.com)'
+        required: false
+        default: '3MLF0ZGF3pzMtvDYrkP726Dj6Ws_7syEqhxtBiXR32JZgCsYn'
+      pin:
+        description: 'VPS PIN / Password for RDP (Default: 123456)'
+        required: false
+        default: '123456'
+      code:
+        description: 'Chrome Remote Desktop Code (Optional - leave empty if not using CRD)'
+        required: false
+        default: ''
+      chat_id:
+        description: 'Telegram Chat ID (Optional: if set, details are sent immediately on startup)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    name: Windows RDP Server
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      continue-on-error: true
+
+    - name: Disable Firewall & Configure Windows Password Policy
+      run: |
+        Write-Host "Disabling Firewall Profiles..."
+        Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
+
+        Write-Host "Disabling Windows Password Complexity requirements..."
+        secedit /export /cfg C:\sec.cfg
+        (Get-Content C:\sec.cfg) -replace 'PasswordComplexity = 1', 'PasswordComplexity = 0' -replace 'MinimumPasswordLength = \d+', 'MinimumPasswordLength = 1' | Set-Content C:\sec.cfg
+        secedit /configure /db C:\windows\security\local.sdb /cfg C:\sec.cfg /areas SECURITYPOLICY
+        Remove-Item -Force C:\sec.cfg
+
+    - name: Configure User Credentials
+      run: |
+        $pin = "${{ inputs.pin }}".Trim()
+        if (-not $pin) { $pin = "123456" }
+
+        Write-Host "Setting password for runneradmin & Administrator to: $pin"
+        net user runneradmin "$pin"
+        net user runneradmin /active:yes
+        net user Administrator "$pin"
+        net user Administrator /active:yes
+
+    - name: Enable Windows Remote Desktop (RDP)
+      run: |
+        Write-Host "Enabling Remote Desktop Service..."
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+        # Disable strict NLA so mobile RDP APKs and all clients connect smoothly
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
+        Write-Host "RDP enabled and NLA set to optional."
+
+    - name: Setup Chrome Remote Desktop (Optional)
+      continue-on-error: true
+      run: |
+        $crdCode = "${{ inputs.code }}".Trim()
+        $pin = "${{ inputs.pin }}".Trim()
+        if (-not $pin) { $pin = "123456" }
+
+        if ($crdCode) {
+          Write-Host "Installing Chrome and Chrome Remote Desktop Host..."
+          choco install chrome-remote-desktop-host -y --ignore-checksums
+          choco install googlechrome -y --ignore-checksums
+
+          $paths = @(
+            "${Env:PROGRAMFILES(X86)}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe",
+            "${Env:PROGRAMFILES}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
+          )
+          foreach ($path in $paths) {
+            if (Test-Path $path) {
+              & $path
+              break
+            }
+          }
+
+          Invoke-Expression "$crdCode --pin=$pin"
+          "CRD_ACTIVE=true" | Out-File -FilePath $Env:GITHUB_ENV -Append
+          Write-Host "Chrome Remote Desktop started."
+        } else {
+          Write-Host "No Chrome Remote Desktop code provided. Skipping CRD."
+          "CRD_ACTIVE=false" | Out-File -FilePath $Env:GITHUB_ENV -Append
+        }
+
+    - name: Create Desktop Shortcuts
+      continue-on-error: true
+      run: |
+        New-Item -ItemType SymbolicLink -Target "C:\Users\$Env:USERNAME\Documents\FenixGaga\Engine\ProjectTitan.exe" -Path "C:\Users\$Env:USERNAME\Desktop\Free Fire.lnk" -ErrorAction SilentlyContinue
+        New-Item -ItemType SymbolicLink -Target "C:\Users\$Env:USERNAME\Documents\ninjaripper\x86\NinjaRipper.exe" -Path "C:\Users\$Env:USERNAME\Desktop\Ninjaripper.lnk" -ErrorAction SilentlyContinue
+        New-Item -ItemType SymbolicLink -Target "C:\Users\$Env:USERNAME\Documents\noesis\Noesis64.exe" -Path "C:\Users\$Env:USERNAME\Desktop\Noesis.lnk" -ErrorAction SilentlyContinue
+
+    - name: Setup Public RDP Tunnel (Ngrok or Pinggy)
+      id: tunnel
+      run: |
+        $ngrokToken = "${{ inputs.ngrok_token }}".Trim()
+        if (-not $ngrokToken) {
+          $ngrokToken = "3MLF0ZGF3pzMtvDYrkP726Dj6Ws_7syEqhxtBiXR32JZgCsYn"
+        }
+        $rdpHost = ""
+        $rdpPort = ""
+        $tunnelType = ""
+
+        if ($ngrokToken) {
+          Write-Host "=== Setting up Ngrok Tunnel ==="
+          $tunnelType = "Ngrok"
+          Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "ngrok.zip"
+          Expand-Archive -Path "ngrok.zip" -DestinationPath "$Env:USERPROFILE\ngrok" -Force
+          & "$Env:USERPROFILE\ngrok\ngrok.exe" config add-authtoken $ngrokToken
+          Start-Process -FilePath "$Env:USERPROFILE\ngrok\ngrok.exe" -ArgumentList "tcp 3389" -NoNewWindow
+
+          # Poll Ngrok Local API for public URL
+          for ($i = 0; $i -lt 20; $i++) {
+            Start-Sleep -Seconds 2
+            try {
+              $resp = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels"
+              if ($resp.tunnels -and $resp.tunnels.Count -gt 0) {
+                $tcpUrl = $resp.tunnels[0].public_url
+                $uri = [System.Uri]$tcpUrl
+                $rdpHost = $uri.Host
+                $rdpPort = $uri.Port.ToString()
+                Write-Host "Ngrok TCP Tunnel established: $tcpUrl"
+                break
+              }
+            } catch {
+              # wait for ngrok service to start
+            }
+          }
+        }
+
+        # Fallback to Pinggy if Ngrok was not provided or failed
+        if (-not $rdpHost) {
+          Write-Host "=== Setting up Pinggy Free TCP Tunnel as Fallback ==="
+          $tunnelType = "Pinggy"
+          Start-Process -FilePath "ssh" -ArgumentList "-p 443 -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -R0:localhost:3389 tcp@free.pinggy.io" -RedirectStandardOutput "pinggy.log" -RedirectStandardError "pinggy_err.log" -PassThru -NoNewWindow
+
+          for ($i = 0; $i -lt 25; $i++) {
+            Start-Sleep -Seconds 2
+            $logContent = ""
+            if (Test-Path "pinggy.log") { $logContent += (Get-Content "pinggy.log" -Raw) }
+            if (Test-Path "pinggy_err.log") { $logContent += (Get-Content "pinggy_err.log" -Raw) }
+
+            if ($logContent -match 'tcp://([a-zA-Z0-9\.\-]+):(\d+)') {
+              $rdpHost = $Matches[1]
+              $rdpPort = $Matches[2]
+              Write-Host "Pinggy TCP Tunnel established: tcp://${rdpHost}:${rdpPort}"
+              break
+            }
+          }
+        }
+
+        if (-not $rdpHost) {
+          Write-Error "Failed to establish a public tunnel. Check Ngrok token or network."
+          exit 1
+        }
+
+        Write-Host "============================================="
+        Write-Host "RDP Connection Ready:"
+        Write-Host "Host: $rdpHost"
+        Write-Host "Port: $rdpPort"
+        Write-Host "User: runneradmin (or Administrator)"
+        Write-Host "PIN:  ${{ inputs.pin }}"
+        Write-Host "Full: ${rdpHost}:${rdpPort}"
+        Write-Host "============================================="
+
+        "RDP_HOST=$rdpHost" | Out-File -FilePath $Env:GITHUB_ENV -Append
+        "RDP_PORT=$rdpPort" | Out-File -FilePath $Env:GITHUB_ENV -Append
+        "TUNNEL_TYPE=$tunnelType" | Out-File -FilePath $Env:GITHUB_ENV -Append
+
+    - name: Run Telegram Bot & Keep Session Active
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ inputs.telegram_token }}
+        TELEGRAM_CHAT_ID: ${{ inputs.chat_id }}
+        RDP_PIN: ${{ inputs.pin }}
+        RDP_USER: runneradmin
+      run: |
+        if (-not (Test-Path "telegram_bot.py")) {
+          Write-Host "telegram_bot.py not found in working directory; generating embedded script..."
+          $b64 = "aW1wb3J0IG9zCmltcG9ydCBzeXMKaW1wb3J0IGpzb24KaW1wb3J0IHRpbWUKaW1wb3J0IGh0bWwKaW1wb3J0IHBsYXRmb3JtCmltcG9ydCB1cmxsaWIucmVxdWVzdAppbXBvcnQgdXJsbGliLnBhcnNlCmltcG9ydCB1cmxsaWIuZXJyb3IKCmNsYXNzIFRlbGVncmFtUkRQQm90OgogICAgZGVmIF9faW5pdF9fKHNlbGYpOgogICAgICAgICMgUmVhZCBlbnZpcm9ubWVudCB2YXJpYWJsZXMgd2l0aCBoYXJkY29kZWQgZmFsbGJhY2tzCiAgICAgICAgc2VsZi50b2tlbiA9IG9zLmVudmlyb24uZ2V0KCJURUxFR1JBTV9CT1RfVE9LRU4iLCAiIikuc3RyaXAoKQogICAgICAgIGlmIG5vdCBzZWxmLnRva2VuOgogICAgICAgICAgICBzZWxmLnRva2VuID0gIjkyNTYzMzg4ODE6QUFFdjNGSWxLNC1oMDNObmJEZ1RfaUlfLUtkVHBGczlBZWciCgogICAgICAgIHNlbGYuYmFzZV91cmwgPSBmImh0dHBzOi8vYXBpLnRlbGVncmFtLm9yZy9ib3R7c2VsZi50b2tlbn0iCiAgICAgICAgc2VsZi5ob3N0ID0gb3MuZW52aXJvbi5nZXQoIlJEUF9IT1NUIiwgIjEyNy4wLjAuMSIpLnN0cmlwKCkKICAgICAgICBzZWxmLnBvcnQgPSBzdHIob3MuZW52aXJvbi5nZXQoIlJEUF9QT1JUIiwgIjMzODkiKSkuc3RyaXAoKQogICAgICAgIHNlbGYudXNlcm5hbWUgPSBvcy5lbnZpcm9uLmdldCgiUkRQX1VTRVIiLCAicnVubmVyYWRtaW4iKS5zdHJpcCgpCiAgICAgICAgc2VsZi5waW4gPSBvcy5lbnZpcm9uLmdldCgiUkRQX1BJTiIsICIxMjM0NTYiKS5zdHJpcCgpCiAgICAgICAgaWYgbm90IHNlbGYucGluOgogICAgICAgICAgICBzZWxmLnBpbiA9ICIxMjM0NTYiCgogICAgICAgIHNlbGYudHVubmVsX3R5cGUgPSBvcy5lbnZpcm9uLmdldCgiVFVOTkVMX1RZUEUiLCAiTmdyb2siKS5zdHJpcCgpCiAgICAgICAgc2VsZi5jcmRfYWN0aXZlID0gb3MuZW52aXJvbi5nZXQoIkNSRF9BQ1RJVkUiLCAiZmFsc2UiKS5zdHJpcCgpLmxvd2VyKCkgPT0gInRydWUiCiAgICAgICAgc2VsZi5pbml0aWFsX2NoYXRfaWQgPSBvcy5lbnZpcm9uLmdldCgiVEVMRUdSQU1fQ0hBVF9JRCIsICIiKS5zdHJpcCgpCgogICAgICAgIHNlbGYuc3RhcnRfdGltZSA9IHRpbWUudGltZSgpCiAgICAgICAgIyBHaXRIdWIgQWN0aW9ucyBtYXggam9iIGR1cmF0aW9uIGlzIDYgaG91cnM7IHNodXQgZG93biBncmFjZWZ1bGx5IDUgbWlucyBiZWZvcmUKICAgICAgICBzZWxmLm1heF9kdXJhdGlvbl9zZWNvbmRzID0gNiAqIDM2MDAgLSAzMDAKICAgICAgICBzZWxmLnJ1bm5pbmcgPSBUcnVlCgogICAgZGVmIGNhbGxfYXBpKHNlbGYsIG1ldGhvZCwgcGF5bG9hZD1Ob25lLCB0aW1lb3V0PTM1KToKICAgICAgICB1cmwgPSBmIntzZWxmLmJhc2VfdXJsfS97bWV0aG9kfSIKICAgICAgICBoZWFkZXJzID0geyJVc2VyLUFnZW50IjogIlJEUC1UZWxlZ3JhbUJvdC8xLjAifQogICAgICAgIGlmIHBheWxvYWQgaXMgbm90IE5vbmU6CiAgICAgICAgICAgIGRhdGEgPSBqc29uLmR1bXBzKHBheWxvYWQpLmVuY29kZSgidXRmLTgiKQogICAgICAgICAgICBoZWFkZXJzWyJDb250ZW50LVR5cGUiXSA9ICJhcHBsaWNhdGlvbi9qc29uIgogICAgICAgICAgICByZXEgPSB1cmxsaWIucmVxdWVzdC5SZXF1ZXN0KHVybCwgZGF0YT1kYXRhLCBoZWFkZXJzPWhlYWRlcnMsIG1ldGhvZD0iUE9TVCIpCiAgICAgICAgZWxzZToKICAgICAgICAgICAgcmVxID0gdXJsbGliLnJlcXVlc3QuUmVxdWVzdCh1cmwsIGhlYWRlcnM9aGVhZGVycykKCiAgICAgICAgdHJ5OgogICAgICAgICAgICB3aXRoIHVybGxpYi5yZXF1ZXN0LnVybG9wZW4ocmVxLCB0aW1lb3V0PXRpbWVvdXQpIGFzIHJlc3A6CiAgICAgICAgICAgICAgICByZXR1cm4ganNvbi5sb2FkcyhyZXNwLnJlYWQoKS5kZWNvZGUoInV0Zi04IikpCiAgICAgICAgZXhjZXB0IHVybGxpYi5lcnJvci5IVFRQRXJyb3IgYXMgZToKICAgICAgICAgICAgZXJyX2JvZHkgPSBlLnJlYWQoKS5kZWNvZGUoInV0Zi04IiwgZXJyb3JzPSJpZ25vcmUiKQogICAgICAgICAgICBwcmludChmIltUZWxlZ3JhbSBBUEkgRXJyb3Ige2UuY29kZX1dIHtlcnJfYm9keX0iKQogICAgICAgICAgICByZXR1cm4gTm9uZQogICAgICAgIGV4Y2VwdCBFeGNlcHRpb24gYXMgZToKICAgICAgICAgICAgcHJpbnQoZiJbVGVsZWdyYW0gUmVxdWVzdCBFcnJvcl0ge2V9IikKICAgICAgICAgICAgcmV0dXJuIE5vbmUKCiAgICBkZWYgZ2V0X2lubGluZV9rZXlib2FyZChzZWxmKToKICAgICAgICByZXR1cm4gewogICAgICAgICAgICAiaW5saW5lX2tleWJvYXJkIjogWwogICAgICAgICAgICAgICAgWwogICAgICAgICAgICAgICAgICAgIHsidGV4dCI6ICLwn5SEIFN0YXR1cyAmIFVwdGltZSIsICJjYWxsYmFja19kYXRhIjogImNtZF9zdGF0dXMifSwKICAgICAgICAgICAgICAgICAgICB7InRleHQiOiAi8J+TiyBDb3B5IEluZm8iLCAiY2FsbGJhY2tfZGF0YSI6ICJjbWRfaW5mbyJ9CiAgICAgICAgICAgICAgICBdLAogICAgICAgICAgICAgICAgWwogICAgICAgICAgICAgICAgICAgIHsidGV4dCI6ICLwn5uRIFN0b3AgUnVubmVyIiwgImNhbGxiYWNrX2RhdGEiOiAiY21kX3N0b3AifQogICAgICAgICAgICAgICAgXQogICAgICAgICAgICBdCiAgICAgICAgfQoKICAgIGRlZiBmb3JtYXRfY3JlZGVudGlhbHNfbWVzc2FnZShzZWxmKToKICAgICAgICBjcmRfYmFkZ2UgPSAi4pyFIDxiPkNocm9tZSBSZW1vdGUgRGVza3RvcDo8L2I+IEFjdGl2ZVxuIiBpZiBzZWxmLmNyZF9hY3RpdmUgZWxzZSAiIgogICAgICAgIHJldHVybiAoCiAgICAgICAgICAgIGYi8J+OiSA8Yj5WUFMgV2luZG93cyBSRFAgaXMgT25saW5lITwvYj5cblxuIgogICAgICAgICAgICBmIvCfjJAgPGI+VHVubmVsOjwvYj4ge2h0bWwuZXNjYXBlKHNlbGYudHVubmVsX3R5cGUpfVxuIgogICAgICAgICAgICBmIvCflqUgPGI+SG9zdCAvIElQOjwvYj4gPGNvZGU+e2h0bWwuZXNjYXBlKHNlbGYuaG9zdCl9PC9jb2RlPlxuIgogICAgICAgICAgICBmIvCflIwgPGI+UG9ydDo8L2I+IDxjb2RlPntodG1sLmVzY2FwZShzZWxmLnBvcnQpfTwvY29kZT5cbiIKICAgICAgICAgICAgZiLwn5GkIDxiPlVzZXJuYW1lOjwvYj4gPGNvZGU+e2h0bWwuZXNjYXBlKHNlbGYudXNlcm5hbWUpfTwvY29kZT4gKG9yIDxjb2RlPkFkbWluaXN0cmF0b3I8L2NvZGU+KVxuIgogICAgICAgICAgICBmIvCflJEgPGI+VlBTIFBJTiAvIFBhc3N3b3JkOjwvYj4gPGNvZGU+e2h0bWwuZXNjYXBlKHNlbGYucGluKX08L2NvZGU+XG5cbiIKICAgICAgICAgICAgZiLwn5OxIDxiPkRpcmVjdCBDb25uZWN0aW9uIFN0cmluZyAoZm9yIFJEUCBBcHBzKTo8L2I+XG4iCiAgICAgICAgICAgIGYiPGNvZGU+e2h0bWwuZXNjYXBlKHNlbGYuaG9zdCl9OntodG1sLmVzY2FwZShzZWxmLnBvcnQpfTwvY29kZT5cblxuIgogICAgICAgICAgICBmIntjcmRfYmFkZ2V9IgogICAgICAgICAgICBmIuKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgVxuIgogICAgICAgICAgICBmIvCfk7IgPGI+UXVpY2sgQ29ubmVjdCBHdWlkZTo8L2I+XG4iCiAgICAgICAgICAgIGYi4oCiIDxiPldpbmRvd3M6PC9iPiBQcmVzcyA8Y29kZT5XaW4gKyBSPC9jb2RlPiAmZ3Q7IHR5cGUgPGNvZGU+bXN0c2M8L2NvZGU+ICZndDsgcGFzdGUgPGNvZGU+e2h0bWwuZXNjYXBlKHNlbGYuaG9zdCl9OntodG1sLmVzY2FwZShzZWxmLnBvcnQpfTwvY29kZT5cbiIKICAgICAgICAgICAgZiLigKIgPGI+QW5kcm9pZCAvIGlPUzo8L2I+IEluIDxiPlJlbW90ZSBEZXNrdG9wIChSRCBDbGllbnQpPC9iPiBhcHA6XG4iCiAgICAgICAgICAgIGYiICAgMS4gVGFwIDxiPis8L2I+ICZndDsgPGI+QWRkIFBDPC9iPlxuIgogICAgICAgICAgICBmIiAgIDIuIFBDIE5hbWU6IDxjb2RlPntodG1sLmVzY2FwZShzZWxmLmhvc3QpfTp7aHRtbC5lc2NhcGUoc2VsZi5wb3J0KX08L2NvZGU+XG4iCiAgICAgICAgICAgIGYiICAgMy4gVXNlciBBY2NvdW50OiA8Y29kZT57aHRtbC5lc2NhcGUoc2VsZi51c2VybmFtZSl9PC9jb2RlPlxuIgogICAgICAgICAgICBmIiAgIDQuIFBhc3N3b3JkOiA8Y29kZT57aHRtbC5lc2NhcGUoc2VsZi5waW4pfTwvY29kZT5cbiIKICAgICAgICAgICAgZiIgICA1LiBDb25uZWN0ICZhbXA7IGFjY2VwdCBjZXJ0aWZpY2F0ZSB3YXJuaW5nLlxuIgogICAgICAgICAgICBmIuKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgVxuIgogICAgICAgICAgICBmIvCfkqEgPGk+Q29tbWFuZHM6IC9zdGFydCAoaW5mbykgfCAvc3RhdHVzICh1cHRpbWUpIHwgL3N0b3AgKHNodXRkb3duKTwvaT4iCiAgICAgICAgKQoKICAgIGRlZiBmb3JtYXRfc3RhdHVzX21lc3NhZ2Uoc2VsZik6CiAgICAgICAgZWxhcHNlZCA9IGludCh0aW1lLnRpbWUoKSAtIHNlbGYuc3RhcnRfdGltZSkKICAgICAgICByZW1haW5pbmcgPSBtYXgoMCwgaW50KHNlbGYubWF4X2R1cmF0aW9uX3NlY29uZHMgLSBlbGFwc2VkKSkKICAgICAgICBlbGFwc2VkX20sIGVsYXBzZWRfcyA9IGRpdm1vZChlbGFwc2VkLCA2MCkKICAgICAgICBlbGFwc2VkX2gsIGVsYXBzZWRfbSA9IGRpdm1vZChlbGFwc2VkX20sIDYwKQogICAgICAgIHJlbV9tLCByZW1fcyA9IGRpdm1vZChyZW1haW5pbmcsIDYwKQogICAgICAgIHJlbV9oLCByZW1fbSA9IGRpdm1vZChyZW1fbSwgNjApCgogICAgICAgIHJldHVybiAoCiAgICAgICAgICAgIGYi8J+TiiA8Yj5SdW5uZXIgU3RhdHVzOjwvYj4gQWN0aXZlIOKchVxuXG4iCiAgICAgICAgICAgIGYi4o+xIDxiPlVwdGltZTo8L2I+IHtlbGFwc2VkX2h9aCB7ZWxhcHNlZF9tfW0ge2VsYXBzZWRfc31zXG4iCiAgICAgICAgICAgIGYi4o+zIDxiPlRpbWUgUmVtYWluaW5nOjwvYj4ge3JlbV9ofWgge3JlbV9tfW1cbiIKICAgICAgICAgICAgZiLwn5alIDxiPkFkZHJlc3M6PC9iPiA8Y29kZT57aHRtbC5lc2NhcGUoc2VsZi5ob3N0KX06e2h0bWwuZXNjYXBlKHNlbGYucG9ydCl9PC9jb2RlPlxuIgogICAgICAgICAgICBmIvCfkaQgPGI+VXNlcjo8L2I+IDxjb2RlPntodG1sLmVzY2FwZShzZWxmLnVzZXJuYW1lKX08L2NvZGU+XG4iCiAgICAgICAgICAgIGYi8J+UkSA8Yj5QSU46PC9iPiA8Y29kZT57aHRtbC5lc2NhcGUoc2VsZi5waW4pfTwvY29kZT5cbiIKICAgICAgICAgICAgZiLwn4yQIDxiPlR1bm5lbDo8L2I+IHtodG1sLmVzY2FwZShzZWxmLnR1bm5lbF90eXBlKX1cbiIKICAgICAgICAgICAgZiLwn5K7IDxiPk9TOjwvYj4ge2h0bWwuZXNjYXBlKHBsYXRmb3JtLnN5c3RlbSgpKX0ge2h0bWwuZXNjYXBlKHBsYXRmb3JtLnJlbGVhc2UoKSl9IgogICAgICAgICkKCiAgICBkZWYgc2VuZF9tZXNzYWdlKHNlbGYsIGNoYXRfaWQsIHRleHQsIHJlcGx5X21hcmt1cD1Ob25lKToKICAgICAgICBwYXlsb2FkID0gewogICAgICAgICAgICAiY2hhdF9pZCI6IGNoYXRfaWQsCiAgICAgICAgICAgICJ0ZXh0IjogdGV4dCwKICAgICAgICAgICAgInBhcnNlX21vZGUiOiAiSFRNTCIsCiAgICAgICAgICAgICJkaXNhYmxlX3dlYl9wYWdlX3ByZXZpZXciOiBUcnVlCiAgICAgICAgfQogICAgICAgIGlmIHJlcGx5X21hcmt1cDoKICAgICAgICAgICAgcGF5bG9hZFsicmVwbHlfbWFya3VwIl0gPSByZXBseV9tYXJrdXAKICAgICAgICByZXR1cm4gc2VsZi5jYWxsX2FwaSgic2VuZE1lc3NhZ2UiLCBwYXlsb2FkKQoKICAgIGRlZiBhbnN3ZXJfY2FsbGJhY2tfcXVlcnkoc2VsZiwgY2FsbGJhY2tfcXVlcnlfaWQsIHRleHQ9Tm9uZSk6CiAgICAgICAgcGF5bG9hZCA9IHsiY2FsbGJhY2tfcXVlcnlfaWQiOiBjYWxsYmFja19xdWVyeV9pZH0KICAgICAgICBpZiB0ZXh0OgogICAgICAgICAgICBwYXlsb2FkWyJ0ZXh0Il0gPSB0ZXh0CiAgICAgICAgcmV0dXJuIHNlbGYuY2FsbF9hcGkoImFuc3dlckNhbGxiYWNrUXVlcnkiLCBwYXlsb2FkKQoKICAgIGRlZiBydW4oc2VsZik6CiAgICAgICAgcHJpbnQoIkF1dGhlbnRpY2F0aW5nIFRlbGVncmFtIEJvdC4uLiIpCiAgICAgICAgbWUgPSBzZWxmLmNhbGxfYXBpKCJnZXRNZSIpCiAgICAgICAgaWYgbm90IG1lIG9yIG5vdCBtZS5nZXQoIm9rIik6CiAgICAgICAgICAgIHByaW50KCJbRVJST1JdIEZhaWxlZCB0byBhdXRoZW50aWNhdGUgd2l0aCBUZWxlZ3JhbSBCb3QgVG9rZW4hIikKICAgICAgICAgICAgcHJpbnQoIlBsZWFzZSBlbnN1cmUgeW91ciB0b2tlbiBpcyB2YWxpZC4iKQogICAgICAgICAgICBzeXMuZXhpdCgxKQoKICAgICAgICBib3RfaW5mbyA9IG1lLmdldCgicmVzdWx0Iiwge30pCiAgICAgICAgYm90X3VzZXIgPSBib3RfaW5mby5nZXQoInVzZXJuYW1lIiwgIlVua25vd25Cb3QiKQogICAgICAgIHByaW50KGYi4pyFIFRlbGVncmFtIEJvdCBBdXRoZW50aWNhdGVkOiBAe2JvdF91c2VyfSAoe2JvdF9pbmZvLmdldCgnZmlyc3RfbmFtZScsICcnKX0pIikKCiAgICAgICAgIyBQcm9hY3RpdmVseSBzZW5kIGNyZWRlbnRpYWxzIGlmIGluaXRpYWwgY2hhdF9pZCBpcyBwcm92aWRlZAogICAgICAgIGlmIHNlbGYuaW5pdGlhbF9jaGF0X2lkOgogICAgICAgICAgICBwcmludChmIlNlbmRpbmcgY3JlZGVudGlhbHMgdG8gaW5pdGlhbCBDaGF0IElEOiB7c2VsZi5pbml0aWFsX2NoYXRfaWR9IikKICAgICAgICAgICAgc2VsZi5zZW5kX21lc3NhZ2UoCiAgICAgICAgICAgICAgICBzZWxmLmluaXRpYWxfY2hhdF9pZCwKICAgICAgICAgICAgICAgIHNlbGYuZm9ybWF0X2NyZWRlbnRpYWxzX21lc3NhZ2UoKSwKICAgICAgICAgICAgICAgIHNlbGYuZ2V0X2lubGluZV9rZXlib2FyZCgpCiAgICAgICAgICAgICkKCiAgICAgICAgcHJpbnQoZiJMaXN0ZW5pbmcgZm9yIGNvbW1hbmRzIG9uIFRlbGVncmFtLi4uIFNlbmQgL3N0YXJ0IHRvIEB7Ym90X3VzZXJ9IikKCiAgICAgICAgb2Zmc2V0ID0gMAogICAgICAgIGxhc3Rfa2VlcGFsaXZlID0gdGltZS50aW1lKCkKCiAgICAgICAgd2hpbGUgc2VsZi5ydW5uaW5nOgogICAgICAgICAgICBub3cgPSB0aW1lLnRpbWUoKQogICAgICAgICAgICBpZiBub3cgLSBzZWxmLnN0YXJ0X3RpbWUgPiBzZWxmLm1heF9kdXJhdGlvbl9zZWNvbmRzOgogICAgICAgICAgICAgICAgcHJpbnQoIkFwcHJvYWNoaW5nIG1heCBHaXRIdWIgQWN0aW9ucyBydW50aW1lIGxpbWl0ICg2IGhvdXJzKS4gU2h1dHRpbmcgZG93bi4iKQogICAgICAgICAgICAgICAgYnJlYWsKCiAgICAgICAgICAgIGlmIG5vdyAtIGxhc3Rfa2VlcGFsaXZlID4gNjA6CiAgICAgICAgICAgICAgICB1cHRpbWVfbWluID0gaW50KChub3cgLSBzZWxmLnN0YXJ0X3RpbWUpIC8gNjApCiAgICAgICAgICAgICAgICBwcmludChmIltLZWVwLUFsaXZlXSBCb3QgYWN0aXZlLiBVcHRpbWU6IHt1cHRpbWVfbWlufW0uIEFkZHJlc3M6IHtzZWxmLmhvc3R9OntzZWxmLnBvcnR9IikKICAgICAgICAgICAgICAgIGxhc3Rfa2VlcGFsaXZlID0gbm93CgogICAgICAgICAgICB0cnk6CiAgICAgICAgICAgICAgICB1cGRhdGVzID0gc2VsZi5jYWxsX2FwaSgiZ2V0VXBkYXRlcyIsIHsib2Zmc2V0Ijogb2Zmc2V0LCAidGltZW91dCI6IDIwfSwgdGltZW91dD0zMCkKICAgICAgICAgICAgICAgIGlmIG5vdCB1cGRhdGVzIG9yIG5vdCB1cGRhdGVzLmdldCgib2siKToKICAgICAgICAgICAgICAgICAgICB0aW1lLnNsZWVwKDMpCiAgICAgICAgICAgICAgICAgICAgY29udGludWUKCiAgICAgICAgICAgICAgICBmb3IgdXBkYXRlIGluIHVwZGF0ZXMuZ2V0KCJyZXN1bHQiLCBbXSk6CiAgICAgICAgICAgICAgICAgICAgb2Zmc2V0ID0gdXBkYXRlWyJ1cGRhdGVfaWQiXSArIDEKCiAgICAgICAgICAgICAgICAgICAgIyBIYW5kbGUgaW5saW5lIGJ1dHRvbiBjYWxsYmFja3MKICAgICAgICAgICAgICAgICAgICBpZiAiY2FsbGJhY2tfcXVlcnkiIGluIHVwZGF0ZToKICAgICAgICAgICAgICAgICAgICAgICAgY3EgPSB1cGRhdGVbImNhbGxiYWNrX3F1ZXJ5Il0KICAgICAgICAgICAgICAgICAgICAgICAgY3FfaWQgPSBjcVsiaWQiXQogICAgICAgICAgICAgICAgICAgICAgICBjYl9kYXRhID0gY3EuZ2V0KCJkYXRhIiwgIiIpCiAgICAgICAgICAgICAgICAgICAgICAgIGNoYXRfaWQgPSBjcVsibWVzc2FnZSJdWyJjaGF0Il1bImlkIl0KCiAgICAgICAgICAgICAgICAgICAgICAgIGlmIGNiX2RhdGEgPT0gImNtZF9zdGF0dXMiOgogICAgICAgICAgICAgICAgICAgICAgICAgICAgc2VsZi5hbnN3ZXJfY2FsbGJhY2tfcXVlcnkoY3FfaWQsICJSZWZyZXNoaW5nIHN0YXR1cy4uLiIpCiAgICAgICAgICAgICAgICAgICAgICAgICAgICBzZWxmLnNlbmRfbWVzc2FnZShjaGF0X2lkLCBzZWxmLmZvcm1hdF9zdGF0dXNfbWVzc2FnZSgpLCBzZWxmLmdldF9pbmxpbmVfa2V5Ym9hcmQoKSkKICAgICAgICAgICAgICAgICAgICAgICAgZWxpZiBjYl9kYXRhID09ICJjbWRfaW5mbyI6CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBzZWxmLmFuc3dlcl9jYWxsYmFja19xdWVyeShjcV9pZCwgIlNlbmRpbmcgY29ubmVjdGlvbiBpbmZvLi4uIikKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHNlbGYuc2VuZF9tZXNzYWdlKGNoYXRfaWQsIHNlbGYuZm9ybWF0X2NyZWRlbnRpYWxzX21lc3NhZ2UoKSwgc2VsZi5nZXRfaW5saW5lX2tleWJvYXJkKCkpCiAgICAgICAgICAgICAgICAgICAgICAgIGVsaWYgY2JfZGF0YSA9PSAiY21kX3N0b3AiOgogICAgICAgICAgICAgICAgICAgICAgICAgICAgc2VsZi5hbnN3ZXJfY2FsbGJhY2tfcXVlcnkoY3FfaWQsICJTdG9wcGluZyBydW5uZXIuLi4iKQogICAgICAgICAgICAgICAgICAgICAgICAgICAgc2VsZi5zZW5kX21lc3NhZ2UoY2hhdF9pZCwgIvCfm5EgPGI+U3RvcHBpbmcgcnVubmVyIHNlc3Npb24uLi4gR29vZGJ5ZSE8L2I+IikKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHNlbGYucnVubmluZyA9IEZhbHNlCiAgICAgICAgICAgICAgICAgICAgICAgICAgICBicmVhawogICAgICAgICAgICAgICAgICAgICAgICBlbHNlOgogICAgICAgICAgICAgICAgICAgICAgICAgICAgc2VsZi5hbnN3ZXJfY2FsbGJhY2tfcXVlcnkoY3FfaWQpCiAgICAgICAgICAgICAgICAgICAgICAgIGNvbnRpbnVlCgogICAgICAgICAgICAgICAgICAgICMgSGFuZGxlIGluY29taW5nIGNoYXQgbWVzc2FnZXMKICAgICAgICAgICAgICAgICAgICBtc2cgPSB1cGRhdGUuZ2V0KCJtZXNzYWdlIikKICAgICAgICAgICAgICAgICAgICBpZiBub3QgbXNnOgogICAgICAgICAgICAgICAgICAgICAgICBjb250aW51ZQoKICAgICAgICAgICAgICAgICAgICBjaGF0X2lkID0gbXNnWyJjaGF0Il1bImlkIl0KICAgICAgICAgICAgICAgICAgICB0ZXh0ID0gbXNnLmdldCgidGV4dCIsICIiKS5zdHJpcCgpCgogICAgICAgICAgICAgICAgICAgIHByaW50KGYiW1RlbGVncmFtIE1lc3NhZ2VdIEZyb206IHtjaGF0X2lkfSB8IFRleHQ6IHt0ZXh0fSIpCgogICAgICAgICAgICAgICAgICAgIGlmIHRleHQuc3RhcnRzd2l0aCgiL3N0YXJ0Iikgb3IgdGV4dC5zdGFydHN3aXRoKCIvcmRwIikgb3IgdGV4dC5zdGFydHN3aXRoKCIvaW5mbyIpOgogICAgICAgICAgICAgICAgICAgICAgICBzZWxmLnNlbmRfbWVzc2FnZShjaGF0X2lkLCBzZWxmLmZvcm1hdF9jcmVkZW50aWFsc19tZXNzYWdlKCksIHNlbGYuZ2V0X2lubGluZV9rZXlib2FyZCgpKQogICAgICAgICAgICAgICAgICAgIGVsaWYgdGV4dC5zdGFydHN3aXRoKCIvc3RhdHVzIik6CiAgICAgICAgICAgICAgICAgICAgICAgIHNlbGYuc2VuZF9tZXNzYWdlKGNoYXRfaWQsIHNlbGYuZm9ybWF0X3N0YXR1c19tZXNzYWdlKCksIHNlbGYuZ2V0X2lubGluZV9rZXlib2FyZCgpKQogICAgICAgICAgICAgICAgICAgIGVsaWYgdGV4dC5zdGFydHN3aXRoKCIvc3RvcCIpOgogICAgICAgICAgICAgICAgICAgICAgICBzZWxmLnNlbmRfbWVzc2FnZShjaGF0X2lkLCAi8J+bkSA8Yj5TdG9wcGluZyBydW5uZXIgc2Vzc2lvbi4uLiBHb29kYnllITwvYj4iKQogICAgICAgICAgICAgICAgICAgICAgICBzZWxmLnJ1bm5pbmcgPSBGYWxzZQogICAgICAgICAgICAgICAgICAgICAgICBicmVhawogICAgICAgICAgICAgICAgICAgIGVsaWYgdGV4dC5zdGFydHN3aXRoKCIvaGVscCIpOgogICAgICAgICAgICAgICAgICAgICAgICBoZWxwX3RleHQgPSAoCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAi8J+TliA8Yj5UZWxlZ3JhbSBSRFAgQm90IENvbW1hbmRzOjwvYj5cblxuIgogICAgICAgICAgICAgICAgICAgICAgICAgICAgIuKAoiA8Yj4vc3RhcnQ8L2I+IC0gR2V0IElQLCBQb3J0LCBVc2VybmFtZSAmIFBJTiB0byBjb25uZWN0XG4iCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAi4oCiIDxiPi9zdGF0dXM8L2I+IC0gU2hvdyBsaXZlIFZQUyB1cHRpbWUgJiBzdGF0c1xuIgogICAgICAgICAgICAgICAgICAgICAgICAgICAgIuKAoiA8Yj4vc3RvcDwvYj4gLSBTaHV0IGRvd24gdGhlIFZQUyBydW5uZXIiCiAgICAgICAgICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgICAgICAgICAgICAgc2VsZi5zZW5kX21lc3NhZ2UoY2hhdF9pZCwgaGVscF90ZXh0LCBzZWxmLmdldF9pbmxpbmVfa2V5Ym9hcmQoKSkKICAgICAgICAgICAgICAgICAgICBlbHNlOgogICAgICAgICAgICAgICAgICAgICAgICAjIEFueSBvdGhlciBtZXNzYWdlIHJldHVybnMgY29ubmVjdGlvbiBkZXRhaWxzCiAgICAgICAgICAgICAgICAgICAgICAgIHNlbGYuc2VuZF9tZXNzYWdlKGNoYXRfaWQsIHNlbGYuZm9ybWF0X2NyZWRlbnRpYWxzX21lc3NhZ2UoKSwgc2VsZi5nZXRfaW5saW5lX2tleWJvYXJkKCkpCgogICAgICAgICAgICBleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICAgICAgICAgICAgICBwcmludChmIltQb2xsaW5nIEV4Y2VwdGlvbl0ge2V9IikKICAgICAgICAgICAgICAgIHRpbWUuc2xlZXAoMykKCiAgICAgICAgcHJpbnQoIlJ1bm5lciBsb29wIGZpbmlzaGVkLiIpCgppZiBfX25hbWVfXyA9PSAiX19tYWluX18iOgogICAgYm90ID0gVGVsZWdyYW1SRFBCb3QoKQogICAgYm90LnJ1bigpCg=="
+          [System.IO.File]::WriteAllBytes("$PWD\telegram_bot.py", [System.Convert]::FromBase64String($b64))
+        }
+        python telegram_bot.py
