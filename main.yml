@@ -196,16 +196,17 @@ jobs:
           Write-Host "Wireshark is already installed; skipping."
         }
 
-        # 5. MEmu Play Android Emulator
+        # 5. MEmu Play Android Emulator (Non-blocking background setup to prevent hang)
         $memuPath = "C:\Program Files\Microvirt\MEmu\MEmu.exe"
+        $memuInstaller = "C:\Users\runneradmin\Desktop\Install-MEmu.exe"
         if (-not (Test-Path $memuPath)) {
-          Write-Host "Downloading MEmu Play Emulator installer..."
+          Write-Host "Downloading MEmu Play Emulator installer to Desktop..."
           try {
-            Invoke-WebRequest -Uri "https://dl.memuplay.com/download/Memu-Setup.exe" -OutFile "C:\Memu-Setup.exe" -TimeoutSec 180
-            Write-Host "Running MEmu silent installation..."
-            Start-Process -FilePath "C:\Memu-Setup.exe" -ArgumentList "/S" -Wait
-            Remove-Item -Force "C:\Memu-Setup.exe" -ErrorAction SilentlyContinue
-            Write-Host "MEmu Emulator installed successfully."
+            Invoke-WebRequest -Uri "https://dl.memuplay.com/download/Memu-Setup.exe" -OutFile $memuInstaller -TimeoutSec 180
+            Write-Host "Launching MEmu background setup (also placed on Desktop)..."
+            # Launch in background without blocking so runner never gets stuck
+            Start-Process -FilePath $memuInstaller -ArgumentList "-silent"
+            Write-Host "MEmu setup launched. Installer icon also ready on Desktop."
           } catch {
             Write-Warning "MEmu setup encountered an error."
           }
