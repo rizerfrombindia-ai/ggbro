@@ -148,6 +148,71 @@ jobs:
         $Shortcut.Save()
         Write-Host "SavedSession and Chrome profile links created successfully."
 
+    - name: Install Requested Tools (VS Code, HTTP Toolkit + APK, Wireshark, MEmu Emulator)
+      continue-on-error: true
+      run: |
+        Write-Host "=== Checking & Installing Tools (Skipped if already in session) ==="
+
+        # 1. Visual Studio Code
+        $vscodePath = "C:\Program Files\Microsoft VS Code\Code.exe"
+        if (-not (Test-Path $vscodePath)) {
+          Write-Host "Installing Visual Studio Code..."
+          choco install vscode -y --ignore-checksums
+        } else {
+          Write-Host "VS Code is already installed; skipping."
+        }
+
+        # 2. HTTP Toolkit Desktop
+        $httpToolkitPath = "C:\Users\runneradmin\AppData\Local\Programs\httptoolkit\HTTP Toolkit.exe"
+        if (-not (Test-Path $httpToolkitPath)) {
+          Write-Host "Installing HTTP Toolkit Desktop..."
+          choco install httptoolkit -y --ignore-checksums
+        } else {
+          Write-Host "HTTP Toolkit is already installed; skipping."
+        }
+
+        # 3. HTTP Toolkit Android APK
+        $apkDesktop = "C:\Users\runneradmin\Desktop\httptoolkit.apk"
+        $apkSession = "C:\SavedSession\Files\httptoolkit.apk"
+        if (-not (Test-Path $apkDesktop)) {
+          Write-Host "Downloading HTTP Toolkit Android APK to Desktop..."
+          try {
+            Invoke-WebRequest -Uri "https://github.com/httptoolkit/httptoolkit-android/releases/download/v1.7.0/httptoolkit.apk" -OutFile $apkDesktop -TimeoutSec 45
+            Copy-Item -Path $apkDesktop -Destination $apkSession -Force -ErrorAction SilentlyContinue
+            Write-Host "HTTP Toolkit APK ready on Desktop."
+          } catch {
+            Write-Warning "Could not download HTTP Toolkit APK."
+          }
+        } else {
+          Write-Host "HTTP Toolkit APK already present; skipping."
+        }
+
+        # 4. Wireshark Network Protocol Analyzer
+        $wiresharkPath = "C:\Program Files\Wireshark\Wireshark.exe"
+        if (-not (Test-Path $wiresharkPath)) {
+          Write-Host "Installing Wireshark..."
+          choco install wireshark -y --ignore-checksums
+        } else {
+          Write-Host "Wireshark is already installed; skipping."
+        }
+
+        # 5. MEmu Play Android Emulator
+        $memuPath = "C:\Program Files\Microvirt\MEmu\MEmu.exe"
+        if (-not (Test-Path $memuPath)) {
+          Write-Host "Downloading MEmu Play Emulator installer..."
+          try {
+            Invoke-WebRequest -Uri "https://dl.memuplay.com/download/Memu-Setup.exe" -OutFile "C:\Memu-Setup.exe" -TimeoutSec 180
+            Write-Host "Running MEmu silent installation..."
+            Start-Process -FilePath "C:\Memu-Setup.exe" -ArgumentList "/S" -Wait
+            Remove-Item -Force "C:\Memu-Setup.exe" -ErrorAction SilentlyContinue
+            Write-Host "MEmu Emulator installed successfully."
+          } catch {
+            Write-Warning "MEmu setup encountered an error."
+          }
+        } else {
+          Write-Host "MEmu Emulator already installed; skipping."
+        }
+
     - name: Setup Chrome Remote Desktop (Optional)
       continue-on-error: true
       run: |
@@ -301,7 +366,7 @@ jobs:
         TELEGRAM_CHAT_ID: ${{ inputs.chat_id }}
         RDP_PIN: ${{ inputs.pin }}
         RDP_USER: runneradmin
-        GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         GITHUB_REPO: ${{ github.repository }}
       run: |
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
