@@ -1,79 +1,43 @@
-# Windows RDP with Telegram Bot & Ngrok/Pinggy
+# Windows RDP with Telegram Bot & Cloud Sessions
 
-This GitHub Actions workflow launches a free cloud Windows virtual machine, sets up an RDP (Remote Desktop) server, and connects it to a **Telegram Bot**. 
-
-When you send `/start` to your Telegram Bot, it immediately replies with your **IP/Host, Port, Username, and VPS PIN**, allowing you to connect from any **Windows PC (`mstsc`)** or **Android/iOS Remote Desktop app (RD Client APK)**.
+A free cloud Windows virtual machine on GitHub Actions with 100% stable RDP, anti-disconnect watchdog, and **cloud session persistence** (Google accounts, Chrome logins, and desktop files saved and restored via Telegram bot).
 
 ---
 
-## 🚀 Features
+## 🚀 New Features
 
-- **Telegram Bot Integration:** Authenticates your bot and provides connection credentials when you send `/start`.
-- **100% Working RDP Connection:**
-  - Automatic TCP tunneling via **Ngrok** (recommended for ultra-stable sessions) or **Pinggy** (zero-setup free fallback).
-  - Automatically disables Windows Password Complexity so simple PINs (e.g. `123456`) work without policy errors.
-  - Configures Network Level Authentication (NLA) so mobile APKs and Windows apps connect without rejection.
-- **Interactive Bot Commands:**
-  - `/start` or `/rdp` — Receive current IP, Port, Username, PIN, and full address.
-  - `/status` — View runner uptime, remaining time, and system details.
-  - `/stop` — Safely shut down the runner session.
-  - Interactive inline buttons (`🔄 Status & Uptime`, `📋 Copy Info`, `🛑 Stop Runner`).
-- **Optional Chrome Remote Desktop (CRD):** Still supports Google CRD headless code if you wish to run CRD alongside RDP.
+### 1. 🛡️ Anti-Disconnect & Auto-Reconnect (Fixes 45m/1h Disconnects)
+- **Watchdog Daemon**: Continuously monitors the tunnel process. If `bore.pub` or the tunnel drops, it **auto-restarts within 5 seconds** and immediately notifies you of the new port on Telegram!
+- **TCP Keepalive**: Sends active ping probes every 25 seconds to keep Azure NAT connections open so the VM never gets disconnected due to idle timeout.
+- **Power & Session Policies**: Bypasses all Windows Server idle timeouts (`MaxIdleTime = 0`), disables lock screen, and continuously resets Windows session idle counters.
 
----
-
-## 📋 Prerequisites
-
-1. **Telegram Bot Token:**
-   - Open Telegram and message [@BotFather](https://t.me/BotFather).
-   - Send `/newbot`, choose a name and username.
-   - Copy the API token provided (e.g., `7123456789:AAH...`).
-2. **Ngrok Auth Token (Recommended for 100% stability):**
-   - Sign up for a free account at [ngrok.com](https://ngrok.com).
-   - Copy your authtoken from the [Ngrok Dashboard](https://dashboard.ngrok.com/get-started/your-authtoken).
-   - *(Note: If you leave this empty, the workflow automatically falls back to Pinggy SSH tunnel).*
+### 2. 💾 Cloud Session Persistence (Google Accounts & Files Won't Be Lost!)
+- **Auto-created Desktop Folder**: `SavedSession` on the desktop. Any files you put here are saved to the cloud!
+- **Google Accounts & Chrome Data**: Google Chrome profile is automatically linked to the session. Log into your Google accounts, save passwords, and extensions—they will persist across all runner restarts!
+- **Telegram Commands**:
+  - `/sessions` — List all saved cloud sessions and click to load any older session.
+  - `/save [name]` — Save the current session immediately to cloud (defaults to `default`).
+  - `/load [name]` — Load a specific session into your current RDP.
+- **Auto-Save**: Automatically backs up every 20 minutes in the background and when you click `[🛑 Stop Runner]`.
+- **Auto-Restore on Startup**: Automatically restores your `default` session on boot so your accounts are ready when you log in.
 
 ---
 
-## ⚙️ How to Run on GitHub Actions
+## 📋 Prerequisites & Credentials
 
-1. Push or upload this repository to GitHub.
-2. In your GitHub repository, click on the **Actions** tab.
-3. Select **Windows RDP with Telegram Bot** on the left menu.
-4. Click **Run workflow** and fill in the inputs:
-   - **`telegram_token`**: Paste your Telegram Bot token (*Required*).
-   - **`ngrok_token`**: Paste your Ngrok auth token (*Recommended*).
-   - **`pin`**: Set your VPS PIN / Password (*Default: `123456`*).
-   - **`chat_id`**: *(Optional)* Your Telegram chat ID if you want details sent immediately without pressing `/start`.
-   - **`code`**: *(Optional)* Chrome Remote Desktop command if you also want CRD.
-5. Click the green **Run workflow** button.
+- **Telegram Bot**: [@LUPPIEGAY](https://t.me/LUPPIEGAY) (Token pre-configured).
+- **Default PIN / Password**: `123456`
+- **Username**: `runneradmin`
+- **Zero Card / Zero Sign-up**: Uses free Bore TCP tunnel (`bore.pub:<port>`) with zero tokens or cards needed.
 
 ---
 
-## 📱 How to Connect
+## 🎮 How to Use
 
-1. Wait about 1-2 minutes for the workflow to initialize.
-2. Open Telegram and open your bot.
-3. Send **`/start`** to your bot.
-4. The bot will send you:
-   - **Host / IP:** `0.tcp.ap.ngrok.io` (or Pinggy link)
-   - **Port:** `12345`
-   - **Username:** `runneradmin` (or `Administrator`)
-   - **PIN / Password:** `123456`
-   - **Full Address:** `0.tcp.ap.ngrok.io:12345`
-
-### Connecting from Windows PC (`mstsc`):
-1. Press `Win + R`, type `mstsc`, and press **Enter**.
-2. In **Computer**, enter the `Host:Port` (e.g. `0.tcp.ap.ngrok.io:12345`).
-3. Click **Connect**.
-4. Enter Username: `runneradmin` and Password: your `PIN` (`123456`).
-5. If prompted with a certificate warning, click **Yes / Connect**.
-
-### Connecting from Android or iOS (RD Client APK):
-1. Install **Microsoft Remote Desktop** (or RD Client APK) from Google Play Store or App Store.
-2. Tap the **`+`** icon &gt; **Add PC**.
-3. In **PC Name**, enter `Host:Port` (e.g. `0.tcp.ap.ngrok.io:12345`).
-4. In **User Account**, tap *Add user account*:
-   - Username: `runneradmin`
-   - Password: your `PIN` (`123456`)
-5. Save and tap the PC tile to connect.
+1. Go to your repository on GitHub > **[Actions](https://github.com/rizerfrombindia-ai/ggbro/actions)**.
+2. Select **Windows RDP with Telegram Bot** > Click **Run workflow** > Green button.
+3. Open Telegram and message [@LUPPIEGAY](https://t.me/LUPPIEGAY):
+   - Send **`/start`** to get your RDP address (`bore.pub:<port>`), username (`runneradmin`), and PIN (`123456`).
+4. Log in using **Remote Desktop (`mstsc`)** on Windows or **RD Client** on Android/iOS.
+5. Open Chrome, log into your Google Account, do your work.
+6. Send **`/save`** on Telegram (or let auto-save handle it). When you launch a new runner tomorrow, your session and accounts are automatically restored!
